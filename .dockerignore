@@ -1,0 +1,42 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Exports and temporary files
+export_*.html
+*.log
+*.tmp
+
+# Large model files (should be mounted or pulled separately)
+*.keras
+*.pkl
+*.h5
+data/
