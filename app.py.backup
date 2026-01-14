@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+"""
+app.py
+
+FastAPI + Gradio web application for maize yield prediction.
+Features:
+- Automatic feature schema inspection
+- Dynamic UI generation based on feature types
+- CSV upload for time series data
+- Plotly dose-response curve visualization
+- HTML export with embedded data
+"""
+
+import os
+import json
+import base64
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import numpy as np
+import pandas as pd
+import gradio as gr
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from model_wrapper import MaizeYieldPredictor
+
+
+# Global model instance
+predictor: Optional[MaizeYieldPredictor] = None
+
+
+def initialize_model(model_path: str = None, preprocessor_path: str = None):
+    """Initialize the model predictor."""
+    global predictor
+
+    if model_path is None:
+        # Try to find latest model in ../mais-npk/data/models
+        model_dir = Path("../mais-npk/data/models")
+        if model_dir.exists():
+            models = sorted(model_dir.glob("baseline_model_*.keras"), reverse=True)
+            preprocessors = sorted(
+                model_dir.glob("baseline_preprocessor_*.pkl"), reverse=True
+            )
+
+            if models and preprocessors:
+                model_path = str(models[0])
+                preprocessor_path = str(preprocessors[0])
+
+    if model_path and preprocessor_path:
+        predictor = MaizeYieldPredictor(model_path, preprocessor_path)
+        print(f"✓ Modèle chargé: {model_path}")
+        print(f"✓ Préprocesseur chargé: {preprocessor_path}")
+    else:
+        raise FileNotFoundError(
+            "Aucun modèle trouvé. Spécifiez model_path et preprocessor_path."
+        )
+
+
+def create_plotly_curve(
+    dose_response: pd.DataFrame,
+    optimal_n: Optional[float] = None,
+    title: str = "Courbe de réponse azote-rendement",
+) -> go.Figure:
+    """
+    Create Plotly figure for dose-response curve.
+
+    Args:
+        dose_response: DataFrame with n_dose, predicted_yield columns
+        optimal_n: Optional optimal nitrogen dose to highlight
+        title: Figure title
+
+    Returns:
+        Plotly figure
+    """
+    fig = go.Figure()
+
+    # Main curve
+    fig.add_trace(
+        go.Scatter(
+            x=dose_response["n_dose"],
+            y=dose_response["predicted_yield"],
+            mode="lines+markers",
+            name="Rendement prédit",
+            line=dict(color="#2E86AB", width=3),
+            marker=dict(size=6),
+            hovertemplate="<b>Dose N:</b> %{x} kg/ha<br><b>Rendement:</b> %{y:.2f} t/ha<extra></extra>",
+        )
+    )
+
+    # Highlight optimal point
+    if optimal_n is not None:
+        optimal_yield = dose_response[dose_response["n_dose"] == optimal_n][
+            "predicted_yield"
+        ].values[0]
+        fig.add_trace(
+            go.Scatter(
+                x=[optimal_n],
+                y=[optimal_yield],
+                mode="markers",
+                name="Dose optimale",
+                marker=dict(color="#A23B72", size=15, symbol="star"),
+                hovertemplate="<b>Dose optimale:</b> %{x} kg/ha<br><b>Rendement:</b> %{y:.2f} t/ha<extra></extra>",
+            )
+        )
+
+    # Layout
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=20, family="Arial")),
+        xaxis_title="Dose d'azote (kg N/ha)",
+        yaxis_title="Rendement prédit (t/ha)",
+        font=dict(size=14, family="Arial"),
+        hovermode="closest",
+        template="plotly_white",
+        height=500,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01,
+            bgcolor="rgba(255,255,255,0.8)",
+        ),
+    )
+
+    # Grid
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="#E5E5E5")
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="#E5E5E5")
+
+    return fig
+
+
+def create_input_table_html(features: Dict, nitrogen_range: List[float]) -> str:
+    """
+    Create HTML table summarizing all input values.
+
+    Args:
+        features: Dictionary of input features
+        nitrogen_range: Nitrogen dose range used
+
+    Returns:
+        HTML string
+    """
+    html = """
+    <div style="margin-top: 20px;">
+        <h3 style="color: #2E86AB;">📋 Valeurs d'entrée utilisées</h3>
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+            <thead>
+                <tr style="background-color: #2E86AB; color: white;">
+                    <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Paramètre</th>
+                    <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Valeur</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+
+    # Add static features
+    for key, value in features.items():
+        html += f"""
+                <tr style="border-bottom: 1px solid #ddd;">
+                    <td style="padding: 10px; border: 1px solid #ddd;"><strong>{key}</strong></td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">{value}</td>
+                </tr>
+        """
+
+    # Add nitrogen range
+    html += f"""
+                <tr style="border-bottom: 1px solid #ddd; background-color: #f9f9f9;">
+                    <td style="padding: 10px; border: 1px solid #ddd;"><strong>Plage d'azote testée</strong></td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">{min(nitrogen_range)} - {max(nitrogen_range)} kg N/ha</td>
+                </tr>
+    """
+
+    html += """
+            </tbody>
+        </table>
+    </div>
+    """
+
+    return html
+
+
+def export_to_html(
+    dose_response: pd.DataFrame,
+    features: Dict,
+    nitrogen_range: List[float],
+    optimal_info: Dict,
+    fig: go.Figure,
+) -> str:
+    """
+    Export results to self-contained HTML file.
+
+    Args:
+        dose_response: Dose-response DataFrame
+        features: Input features
+        nitrogen_range: Nitrogen range
+        optimal_info: Optimal nitrogen info
+        fig: Plotly figure
+
+    Returns:
+        HTML file path
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Convert Plotly figure to HTML div (no CDN dependencies)
+    plotly_html = fig.to_html(
+        include_plotlyjs="inline",  # Embed Plotly.js
+        div_id="dose-response-plot",
+        config={"responsive": True},
+    )
+
+    # Create input table
+    input_table = create_input_table_html(features, nitrogen_range)
+
+    # Embed data as JSON
+    embedded_data = {
+        "timestamp": timestamp,
+        "features": features,
+        "nitrogen_range": nitrogen_range,
+        "dose_response": dose_response.to_dict(orient="records"),
+        "optimal": optimal_info,
+        "model_version": "1.0",
+    }
+
+    # Create full HTML
+    html_content = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prédiction Rendement Maïs - {timestamp}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #2E86AB 0%, #A23B72 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 32px;
+        }}
+        .header p {{
+            margin: 10px 0 0 0;
+            font-size: 16px;
+            opacity: 0.9;
+        }}
+        .section {{
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        .section h2 {{
+            color: #2E86AB;
+            border-bottom: 3px solid #2E86AB;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }}
+        .optimal-box {{
+            background: linear-gradient(135deg, #A23B72 0%, #F18F01 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }}
+        .optimal-box h3 {{
+            margin: 0 0 15px 0;
+            font-size: 22px;
+        }}
+        .optimal-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }}
+        .optimal-item {{
+            background: rgba(255,255,255,0.2);
+            padding: 15px;
+            border-radius: 5px;
+        }}
+        .optimal-item .label {{
+            font-size: 12px;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }}
+        .optimal-item .value {{
+            font-size: 24px;
+            font-weight: bold;
+        }}
+        .footer {{
+            text-align: center;
+            color: #666;
+            padding: 20px;
+            font-size: 14px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }}
+        th, td {{
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }}
+        th {{
+            background-color: #2E86AB;
+            color: white;
+            font-weight: bold;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f9f9f9;
+        }}
+        tr:hover {{
+            background-color: #f1f1f1;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌽 Prédiction de Rendement du Maïs</h1>
+        <p>Modèle de réponse à l'azote | Généré le {
+        datetime.now().strftime("%d/%m/%Y à %H:%M:%S")
+    }</p>
+    </div>
+
+    <div class="section">
+        <h2>📈 Courbe de réponse azote-rendement</h2>
+        {plotly_html}
+    </div>
+
+    <div class="section">
+        <div class="optimal-box">
+            <h3>⭐ Dose optimale recommandée</h3>
+            <div class="optimal-grid">
+                <div class="optimal-item">
+                    <div class="label">Dose d'azote optimale</div>
+                    <div class="value">{
+        optimal_info["optimal_n_kg_ha"]:.0f} kg N/ha</div>
+                </div>
+                <div class="optimal-item">
+                    <div class="label">Rendement prédit</div>
+                    <div class="value">{
+        optimal_info["predicted_yield_t_ha"]:.2f} t/ha</div>
+                </div>
+                <div class="optimal-item">
+                    <div class="label">Revenu net</div>
+                    <div class="value">{
+        optimal_info["net_revenue_per_ha"]:.0f} $/ha</div>
+                </div>
+                <div class="optimal-item">
+                    <div class="label">Coût fertilisation</div>
+                    <div class="value">{optimal_info["cost_per_ha"]:.0f} $/ha</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        {input_table}
+    </div>
+
+    <div class="section">
+        <h2>📊 Données complètes</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Dose N (kg/ha)</th>
+                    <th>Rendement prédit (t/ha)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {
+        "".join(
+            [
+                f"<tr><td>{row["n_dose"]}</td><td>{row["predicted_yield"]:.3f}</td></tr>"
+                for _, row in dose_response.iterrows()
+            ]
+        )
+    }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="footer">
+        <p>Ce rapport a été généré automatiquement par le système de prédiction de rendement du maïs.</p>
+        <p>Modèle version 1.0 | Toutes les données sont embarquées dans ce fichier HTML.</p>
+    </div>
+
+    <!-- Embedded Data (JSON) -->
+    <script type="application/json" id="embedded-data">
+    {json.dumps(embedded_data, indent=2, ensure_ascii=False)}
+    </script>
+
+    <script type="application/json" id="feature-schema">
+    {json.dumps(predictor.describe_features(), indent=2, ensure_ascii=False)}
+    </script>
+</body>
+</html>"""
+
+    # Save HTML file
+    output_path = f"export_prediction_{timestamp}.html"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    return output_path
+
+
+def predict_and_visualize(
+    latitude: float,
+    longitude: float,
+    ph_eau: float,
+    som_log_ratio: float,
+    soil_ilr1: float,
+    soil_ilr2: float,
+    tillage_ord: int,
+    prev_crop_n: int,
+    density_norm: float,
+    n_min: float,
+    n_max: float,
+    n_step: float,
+    n_price: float,
+    grain_price: float,
+    weather_csv_pre: Optional[gr.File] = None,
+    weather_csv_growing: Optional[gr.File] = None,
+) -> Tuple[go.Figure, str, str, str]:
+    """
+    Main prediction function called by Gradio interface.
+
+    Returns:
+        - Plotly figure
+        - Optimal N recommendation (HTML)
+        - Input summary table (HTML)
+        - Export button state
+    """
+    # Prepare features dictionary
+    features = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "ph_eau": ph_eau,
+        "som_log_ratio": som_log_ratio,
+        "soil_ilr1": soil_ilr1,
+        "soil_ilr2": soil_ilr2,
+        "tillage_ord": tillage_ord,
+        "prev_crop_n": prev_crop_n,
+        "density_norm": density_norm,
+    }
+
+    # Prepare nitrogen range
+    nitrogen_range = list(np.arange(n_min, n_max + n_step, n_step))
+
+    # Load weather data if provided
+    weather_data = None
+    if weather_csv_pre is not None or weather_csv_growing is not None:
+        weather_data = {}
+        if weather_csv_pre is not None:
+            weather_data["pre_seedling"] = pd.read_csv(weather_csv_pre.name)
+        if weather_csv_growing is not None:
+            weather_data["growing"] = pd.read_csv(weather_csv_growing.name)
+
+    # Predict
+    dose_response = predictor.predict_response_curve(
+        features=features, nitrogen_range=nitrogen_range, weather_data=weather_data
+    )
+
+    # Find optimal nitrogen
+    optimal_info = predictor.find_optimal_nitrogen(
+        dose_response=dose_response, n_price=n_price, grain_price=grain_price
+    )
+
+    # Create visualization
+    fig = create_plotly_curve(
+        dose_response=dose_response,
+        optimal_n=optimal_info["optimal_n_kg_ha"],
+        title="Courbe de réponse azote-rendement",
+    )
+
+    # Create optimal info HTML
+    optimal_html = f"""
+    <div style="background: linear-gradient(135deg, #A23B72 0%, #F18F01 100%);
+                color: white; padding: 20px; border-radius: 10px; margin: 15px 0;">
+        <h3 style="margin: 0 0 15px 0;">⭐ Recommandation optimale</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px;">
+            <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px;">
+                <div style="font-size: 12px; opacity: 0.9;">Dose d'azote optimale</div>
+                <div style="font-size: 28px; font-weight: bold;">{optimal_info["optimal_n_kg_ha"]:.0f} kg N/ha</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px;">
+                <div style="font-size: 12px; opacity: 0.9;">Rendement prédit</div>
+                <div style="font-size: 28px; font-weight: bold;">{optimal_info["predicted_yield_t_ha"]:.2f} t/ha</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px;">
+                <div style="font-size: 12px; opacity: 0.9;">Revenu net</div>
+                <div style="font-size: 28px; font-weight: bold;">{optimal_info["net_revenue_per_ha"]:.0f} $/ha</div>
+            </div>
+        </div>
+    </div>
+    """
+
+    # Create input summary
+    input_summary = create_input_table_html(features, nitrogen_range)
+
+    # Export HTML
+    html_path = export_to_html(
+        dose_response=dose_response,
+        features=features,
+        nitrogen_range=nitrogen_range,
+        optimal_info=optimal_info,
+        fig=fig,
+    )
+
+    return fig, optimal_html, input_summary, html_path
+
+
+def create_gradio_interface():
+    """Create Gradio interface with dynamic controls based on feature schema."""
+
+    if predictor is None:
+        raise RuntimeError(
+            "Le modèle n'est pas initialisé. Appelez initialize_model() d'abord."
+        )
+
+    # Get feature schema
+    schema = predictor.describe_features()
+
+    with gr.Blocks(
+        title="Prédiction Rendement Maïs",
+        theme=gr.themes.Soft(primary_hue="blue", secondary_hue="pink"),
+    ) as interface:
+        gr.Markdown("""
+        # 🌽 Prédiction du Rendement du Maïs
+        ### Modèle de réponse à la fertilisation azotée
+
+        Entrez les caractéristiques de votre parcelle pour obtenir une courbe de réponse dose-rendement
+        et une recommandation de fertilisation optimale.
+        """)
+
+        with gr.Tabs():
+            # Tab 1: Static Features
+            with gr.Tab("📍 Caractéristiques statiques"):
+                with gr.Row():
+                    with gr.Column():
+                        # Generate inputs dynamically from schema
+                        inputs_static = {}
+
+                        for feature in schema["features"]["static"]:
+                            if feature["type"] == "numeric":
+                                inputs_static[feature["name"]] = gr.Number(
+                                    minimum=feature["min"],
+                                    maximum=feature["max"],
+                                    value=feature["default"],
+                                    label=f"{feature['label']} ({feature['unit']})",
+                                    info=feature["description"],
+                                )
+                            elif feature["type"] == "categorical":
+                                choices = [
+                                    (opt["label"], opt["value"])
+                                    for opt in feature["options"]
+                                ]
+                                inputs_static[feature["name"]] = gr.Radio(
+                                    choices=choices,
+                                    value=feature["default"],
+                                    label=feature["label"],
+                                    info=feature["description"],
+                                )
+
+            # Tab 2: Weather Data (optional)
+            with gr.Tab("🌦️ Données météo (optionnel)"):
+                gr.Markdown("""
+                **Format CSV requis:** Les fichiers CSV doivent contenir les colonnes météo journalières.
+                - **Pré-semis:** 30 jours avant le semis
+                - **Saison de croissance:** Jusqu'à 200 jours après le semis
+
+                Si aucun fichier n'est fourni, le modèle utilisera des valeurs par défaut.
+                """)
+
+                with gr.Row():
+                    weather_csv_pre = gr.File(
+                        label="📄 CSV météo pré-semis (30 jours)",
+                        file_types=[".csv"],
+                        type="filepath",
+                    )
+                    weather_csv_growing = gr.File(
+                        label="📄 CSV météo saison de croissance (200 jours)",
+                        file_types=[".csv"],
+                        type="filepath",
+                    )
+
+            # Tab 3: Nitrogen & Economics
+            with gr.Tab("💰 Azote et économie"):
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### Plage de doses d'azote à tester")
+                        n_min = gr.Slider(
+                            minimum=0,
+                            maximum=150,
+                            value=0,
+                            step=10,
+                            label="Dose minimale (kg N/ha)",
+                        )
+                        n_max = gr.Slider(
+                            minimum=100,
+                            maximum=400,
+                            value=300,
+                            step=10,
+                            label="Dose maximale (kg N/ha)",
+                        )
+                        n_step = gr.Slider(
+                            minimum=5,
+                            maximum=50,
+                            value=25,
+                            step=5,
+                            label="Pas d'incrémentation (kg N/ha)",
+                        )
+
+                    with gr.Column():
+                        gr.Markdown("### Paramètres économiques")
+                        n_price = gr.Number(
+                            value=1.5,
+                            label="Prix de l'azote ($/kg N)",
+                            info="Coût de l'engrais azoté par kg de N",
+                        )
+                        grain_price = gr.Number(
+                            value=0.20,
+                            label="Prix du grain ($/kg)",
+                            info="Prix de vente du maïs grain",
+                        )
+
+        # Predict button
+        predict_btn = gr.Button(
+            "🚀 Calculer la courbe de réponse", variant="primary", size="lg"
+        )
+
+        # Outputs
+        gr.Markdown("---")
+        gr.Markdown("## 📊 Résultats")
+
+        with gr.Row():
+            with gr.Column(scale=2):
+                plot_output = gr.Plot(label="Courbe de réponse azote-rendement")
+
+            with gr.Column(scale=1):
+                optimal_output = gr.HTML(label="Recommandation optimale")
+
+        with gr.Accordion("📋 Détails des entrées", open=False):
+            input_summary_output = gr.HTML()
+
+        # Export button
+        gr.Markdown("### 💾 Exporter les résultats")
+        export_btn = gr.File(
+            label="Télécharger le rapport HTML complet", type="filepath"
+        )
+
+        # Connect predict button
+        all_inputs = [
+            inputs_static.get(f["name"]) for f in schema["features"]["static"]
+        ] + [
+            n_min,
+            n_max,
+            n_step,
+            n_price,
+            grain_price,
+            weather_csv_pre,
+            weather_csv_growing,
+        ]
+
+        predict_btn.click(
+            fn=predict_and_visualize,
+            inputs=all_inputs,
+            outputs=[plot_output, optimal_output, input_summary_output, export_btn],
+        )
+
+        gr.Markdown("""
+        ---
+        **Note:** Ce modèle est basé sur des données expérimentales et fournit une estimation.
+        Les recommandations doivent être adaptées aux conditions locales spécifiques.
+        """)
+
+    return interface
+
+
+def main():
+    """Main application entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Application web de prédiction du rendement du maïs"
+    )
+    parser.add_argument(
+        "--model", type=str, help="Chemin vers le fichier .keras du modèle"
+    )
+    parser.add_argument(
+        "--preprocessor", type=str, help="Chemin vers le fichier .pkl du préprocesseur"
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0", help="Host (défaut: 0.0.0.0)"
+    )
+    parser.add_argument("--port", type=int, default=7860, help="Port (défaut: 7860)")
+    parser.add_argument(
+        "--share", action="store_true", help="Créer un lien public Gradio"
+    )
+
+    args = parser.parse_args()
+
+    # Initialize model
+    print("🌽 Chargement du modèle...")
+    initialize_model(args.model, args.preprocessor)
+
+    # Create interface
+    print("🎨 Création de l'interface...")
+    interface = create_gradio_interface()
+
+    # Launch
+    print(f"🚀 Lancement de l'application sur http://{args.host}:{args.port}")
+    interface.launch(server_name=args.host, server_port=args.port, share=args.share)
+
+
+if __name__ == "__main__":
+    main()
