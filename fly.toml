@@ -2,7 +2,7 @@
 # Deploy with: flyctl deploy
 
 app = "maisui"
-primary_region = "yul"  # Montreal region (closest to Quebec)
+primary_region = "yyz"  # Toronto region (closest to Quebec, yul is deprecated)
 
 [build]
   dockerfile = "Dockerfile"

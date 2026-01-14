@@ -1,0 +1,53 @@
+{
+  "export_date": "2026-01-12T19:54:16.418208",
+  "source_model": "final_model_20260112_194653.keras",
+  "model_format": "keras_3",
+  "backend": "torch",
+  "preprocessor": {
+    "pre_seedling_days": 30,
+    "max_growing_days": 200,
+    "n_weather_features": 21,
+    "n_static_features": 15,
+    "weather_cols": [
+      "evapotranspiration_crop_mm",
+      "potential_evaporation",
+      "potential_evaporation_mm",
+      "precipitation_m",
+      "precipitation_mm",
+      "soil_temperature_1_c",
+      "soil_temperature_2_c",
+      "soil_temperature_level_1",
+      "soil_temperature_level_2",
+      "solar_radiation_MJ",
+      "surface_net_solar_radiation",
+      "surface_net_thermal_radiation",
+      "surface_solar_radiation_downwards",
+      "temperature_2m_max",
+      "temperature_2m_mean",
+      "temperature_2m_min",
+      "total_precipitation",
+      "u_component_of_wind_10m",
+      "v_component_of_wind_10m",
+      "volumetric_soil_water_layer_1",
+      "volumetric_soil_water_layer_2"
+    ],
+    "static_cols": [
+      "annee",
+      "semis_jd",
+      "recolte_jd",
+      "latitude",
+      "longitude",
+      "ph_eau",
+      "som_log_ratio",
+      "soil_ilr1",
+      "soil_ilr2",
+      "tillage_ord",
+      "prev_crop_n",
+      "density_norm",
+      "no3n_log",
+      "no3n_was_imputed",
+      "hybrid_utm_norm"
+    ],
+    "scale_yield": false
+  }
+}

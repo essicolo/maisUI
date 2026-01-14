@@ -22,8 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY model_wrapper.py .
 COPY app.py .
 
-# Create directories for model files
-RUN mkdir -p /app/models
+# Copy model files
+COPY models/ /app/models/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -38,4 +38,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/ || exit 1
 
 # Run application
-CMD ["python", "app.py", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "app.py", "--model", "/app/models/baseline_model.keras", "--preprocessor", "/app/models/baseline_preprocessor.pkl", "--host", "0.0.0.0", "--port", "8080"]
